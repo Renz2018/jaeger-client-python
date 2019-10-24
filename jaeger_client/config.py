@@ -111,6 +111,7 @@ class Config(object):
         self._error_reporter = ErrorReporter(
             metrics=Metrics(),
             logger=logger if self.logging else None,
+            log_interval_minutes=1,
         )
 
     def _validate_config(self, config):

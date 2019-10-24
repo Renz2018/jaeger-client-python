@@ -100,7 +100,7 @@ class Reporter(NullReporter):
         self.metrics = ReporterMetrics(self.metrics_factory)
         self.error_reporter = error_reporter or ErrorReporter(Metrics())
         self.logger = kwargs.get('logger', default_logger)
-        self.agent = Agent.Client(self._channel, self)
+        self.agent = Agent.Client(self.getProtocol(self._channel))
 
         if queue_capacity < batch_size:
             raise ValueError('Queue capacity cannot be less than batch size')
@@ -122,7 +122,7 @@ class Reporter(NullReporter):
             )
 
     def report_span(self, span):
-        gevent.spawn(self._report_span_from_ioloop, span)
+        self._report_span_from_ioloop(span)
 
     def _report_span_from_ioloop(self, span):
         try:
