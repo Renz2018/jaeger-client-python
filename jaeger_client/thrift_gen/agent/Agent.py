@@ -3,7 +3,7 @@
 #
 # DO NOT EDIT UNLESS YOU ARE SURE THAT YOU KNOW WHAT YOU ARE DOING
 #
-#  options string: py:new_style,tornado
+#  options string: py:new_style
 #
 import six
 from six.moves import xrange
@@ -19,9 +19,6 @@ try:
 except:
   fastbinary = None
 
-from tornado import gen
-from tornado import concurrent
-from thrift.transport import TTransport
 
 class Iface(object):
   def emitZipkinBatch(self, spans):
@@ -40,72 +37,40 @@ class Iface(object):
 
 
 class Client(Iface):
-  def __init__(self, transport, iprot_factory, oprot_factory=None):
-    self._transport = transport
-    self._iprot_factory = iprot_factory
-    self._oprot_factory = (oprot_factory if oprot_factory is not None
-                           else iprot_factory)
+  def __init__(self, iprot, oprot=None):
+    self._iprot = self._oprot = iprot
+    if oprot is not None:
+      self._oprot = oprot
     self._seqid = 0
-    self._reqs = {}
-    self._transport.io_loop.spawn_callback(self._start_receiving)
-
-  @gen.coroutine
-  def _start_receiving(self):
-    while True:
-      try:
-        frame = yield self._transport.readFrame()
-      except TTransport.TTransportException as e:
-        for future in self._reqs.itervalues():
-          future.set_exception(e)
-        self._reqs = {}
-        return
-      tr = TTransport.TMemoryBuffer(frame)
-      iprot = self._iprot_factory.getProtocol(tr)
-      (fname, mtype, rseqid) = iprot.readMessageBegin()
-      future = self._reqs.pop(rseqid, None)
-      if not future:
-        # future has already been discarded
-        continue
-      method = getattr(self, 'recv_' + fname)
-      try:
-        result = method(iprot, mtype, rseqid)
-      except Exception as e:
-        future.set_exception(e)
-      else:
-        future.set_result(result)
 
   def emitZipkinBatch(self, spans):
     """
     Parameters:
      - spans
     """
-    self._seqid += 1
     self.send_emitZipkinBatch(spans)
 
   def send_emitZipkinBatch(self, spans):
-    oprot = self._oprot_factory.getProtocol(self._transport)
-    oprot.writeMessageBegin('emitZipkinBatch', TMessageType.ONEWAY, self._seqid)
+    self._oprot.writeMessageBegin('emitZipkinBatch', TMessageType.ONEWAY, self._seqid)
     args = emitZipkinBatch_args()
     args.spans = spans
-    args.write(oprot)
-    oprot.writeMessageEnd()
-    oprot.trans.flush()
+    args.write(self._oprot)
+    self._oprot.writeMessageEnd()
+    self._oprot.trans.flush()
   def emitBatch(self, batch):
     """
     Parameters:
      - batch
     """
-    self._seqid += 1
     self.send_emitBatch(batch)
 
   def send_emitBatch(self, batch):
-    oprot = self._oprot_factory.getProtocol(self._transport)
-    oprot.writeMessageBegin('emitBatch', TMessageType.ONEWAY, self._seqid)
+    self._oprot.writeMessageBegin('emitBatch', TMessageType.ONEWAY, self._seqid)
     args = emitBatch_args()
     args.batch = batch
-    args.write(oprot)
-    oprot.writeMessageEnd()
-    oprot.trans.flush()
+    args.write(self._oprot)
+    self._oprot.writeMessageEnd()
+    self._oprot.trans.flush()
 
 class Processor(Iface, TProcessor):
   def __init__(self, handler):
@@ -126,21 +91,32 @@ class Processor(Iface, TProcessor):
       oprot.trans.flush()
       return
     else:
-      return self._processMap[name](self, seqid, iprot, oprot)
+      self._processMap[name](self, seqid, iprot, oprot)
+    return True
 
-  @gen.coroutine
   def process_emitZipkinBatch(self, seqid, iprot, oprot):
     args = emitZipkinBatch_args()
     args.read(iprot)
     iprot.readMessageEnd()
-    yield gen.maybe_future(self._handler.emitZipkinBatch(args.spans))
+    try:
+      self._handler.emitZipkinBatch(args.spans)
+      msg_type = TMessageType.REPLY
+    except (TTransport.TTransportException, KeyboardInterrupt, SystemExit):
+      raise
+    except:
+      pass
 
-  @gen.coroutine
   def process_emitBatch(self, seqid, iprot, oprot):
     args = emitBatch_args()
     args.read(iprot)
     iprot.readMessageEnd()
-    yield gen.maybe_future(self._handler.emitBatch(args.batch))
+    try:
+      self._handler.emitBatch(args.batch)
+      msg_type = TMessageType.REPLY
+    except (TTransport.TTransportException, KeyboardInterrupt, SystemExit):
+      raise
+    except:
+      pass
 
 
 # HELPER FUNCTIONS AND STRUCTURES

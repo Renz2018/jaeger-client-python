@@ -17,14 +17,12 @@ from __future__ import absolute_import
 import logging
 import threading
 
-import tornado.gen
-import tornado.ioloop
-import tornado.queues
+import gevent
+import gevent.queue
+
 import socket
-from tornado.concurrent import Future
 from .constants import DEFAULT_FLUSH_INTERVAL
 from . import thrift
-from . import ioloop_util
 from .metrics import Metrics, LegacyMetricsFactory
 from .utils import ErrorReporter
 
@@ -43,9 +41,7 @@ class NullReporter(object):
         pass
 
     def close(self):
-        fut = Future()
-        fut.set_result(True)
-        return fut
+        pass
 
 
 class InMemoryReporter(NullReporter):
@@ -109,16 +105,12 @@ class Reporter(NullReporter):
         if queue_capacity < batch_size:
             raise ValueError('Queue capacity cannot be less than batch size')
 
-        self.io_loop = io_loop or channel.io_loop
-        if self.io_loop is None:
-            self.logger.error('Jaeger Reporter has no IOLoop')
-        else:
-            self.queue = tornado.queues.Queue(maxsize=queue_capacity)
-            self.stop = object()
-            self.stopped = False
-            self.stop_lock = Lock()
-            self.flush_interval = flush_interval or None
-            self.io_loop.spawn_callback(self._consume_queue)
+        self.queue = gevent.queue.JoinableQueue(maxsize=queue_capacity)
+        self.stop = object()
+        self.stopped = False
+        self.stop_lock = Lock()
+        self.flush_interval = flush_interval or None
+        gevent.spawn(self._consume_queue)
 
         self._process_lock = Lock()
         self._process = None
@@ -130,7 +122,7 @@ class Reporter(NullReporter):
             )
 
     def report_span(self, span):
-        self.io_loop.add_callback(self._report_span_from_ioloop, span)
+        gevent.spawn(self._report_span_from_ioloop, span)
 
     def _report_span_from_ioloop(self, span):
         try:
@@ -140,10 +132,9 @@ class Reporter(NullReporter):
                 self.metrics.reporter_dropped(1)
             else:
                 self.queue.put_nowait(span)
-        except tornado.queues.QueueFull:
+        except gevent.queue.Full:
             self.metrics.reporter_dropped(1)
 
-    @tornado.gen.coroutine
     def _consume_queue(self):
         spans = []
         stopped = False
@@ -151,10 +142,9 @@ class Reporter(NullReporter):
             while len(spans) < self.batch_size:
                 try:
                     # using timeout allows periodic flush with smaller packet
-                    timeout = self.flush_interval + self.io_loop.time() \
-                        if self.flush_interval and spans else None
-                    span = yield self.queue.get(timeout=timeout)
-                except tornado.gen.TimeoutError:
+                    timeout = self.flush_interval if self.flush_interval and spans else None
+                    span = self.queue.get(timeout=timeout)
+                except gevent.queue.Empty:
                     break
                 else:
                     if span == self.stop:
@@ -165,7 +155,7 @@ class Reporter(NullReporter):
                     else:
                         spans.append(span)
             if spans:
-                yield self._submit(spans)
+                self._submit(spans)
                 for _ in spans:
                     self.queue.task_done()
                 spans = spans[:0]
@@ -181,7 +171,6 @@ class Reporter(NullReporter):
         """
         return TCompactProtocol.TCompactProtocol(transport)
 
-    @tornado.gen.coroutine
     def _submit(self, spans):
         if not spans:
             return
@@ -191,7 +180,7 @@ class Reporter(NullReporter):
                 return
         try:
             batch = thrift.make_jaeger_batch(spans=spans, process=process)
-            yield self._send(batch)
+            self._send(batch)
             self.metrics.reporter_success(len(spans))
         except socket.error as e:
             self.metrics.reporter_failure(len(spans))
@@ -202,7 +191,6 @@ class Reporter(NullReporter):
             self.error_reporter.error(
                 'Failed to submit traces to jaeger-agent: %s', e)
 
-    @tornado.gen.coroutine
     def _send(self, batch):
         """
         Send batch of spans out via thrift transport. Any exceptions thrown
@@ -218,12 +206,11 @@ class Reporter(NullReporter):
         with self.stop_lock:
             self.stopped = True
 
-        return ioloop_util.submit(self._flush, io_loop=self.io_loop)
+        return self._flush()
 
-    @tornado.gen.coroutine
     def _flush(self):
-        yield self.queue.put(self.stop)
-        yield self.queue.join()
+        self.queue.put(self.stop)
+        self.queue.join()
 
 
 class ReporterMetrics(object):
@@ -254,19 +241,4 @@ class CompositeReporter(NullReporter):
             reporter.report_span(span)
 
     def close(self):
-        from threading import Lock
-        lock = Lock()
-        count = [0]
-        future = Future()
-
-        def on_close(_):
-            with lock:
-                count[0] += 1
-                if count[0] == len(self.reporters):
-                    future.set_result(True)
-
-        for reporter in self.reporters:
-            f = reporter.close()
-            f.add_done_callback(on_close)
-
-        return future
+        pass

@@ -78,7 +78,7 @@ shell:
 THRIFT_GEN_DIR=jaeger_client/thrift_gen
 THRIFT_VER=0.9.3
 THRIFT_IMG=thrift:$(THRIFT_VER)
-THRIFT_PY_ARGS=new_style,tornado
+THRIFT_PY_ARGS=new_style
 THRIFT=docker run -v "${PWD}:/data" -u $(shell id -u) $(THRIFT_IMG) thrift
 
 idl-submodule:

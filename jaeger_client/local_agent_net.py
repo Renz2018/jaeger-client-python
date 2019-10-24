@@ -66,9 +66,6 @@ class LocalAgentSender(TBufferedTransport):
     """
 
     def __init__(self, host, sampling_port, reporting_port, io_loop=None, throttling_port=None):
-        # IOLoop
-        self._thread_loop = None
-        self.io_loop = io_loop or self._create_new_thread_loop()
 
         # HTTP sampling
         self.local_agent_http = LocalAgentHTTP(host, sampling_port)
@@ -81,16 +78,6 @@ class LocalAgentSender(TBufferedTransport):
         # We are buffering things up because we are a TBufferedTransport.
         udp = TUDPTransport(host, reporting_port)
         TBufferedTransport.__init__(self, udp)
-
-    def _create_new_thread_loop(self):
-        """
-        Create a daemonized thread that will run Tornado IOLoop.
-        :return: the IOLoop backed by the new thread.
-        """
-        self._thread_loop = ThreadLoop()
-        if not self._thread_loop.is_ready():
-            self._thread_loop.start()
-        return self._thread_loop._io_loop
 
     def readFrame(self):
         """Empty read frame that is never ready"""
