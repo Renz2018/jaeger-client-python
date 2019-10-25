@@ -14,12 +14,10 @@
 
 from __future__ import absolute_import
 
-from threadloop import ThreadLoop
-import tornado
-import tornado.httpclient
-from tornado.concurrent import Future
-from tornado.httputil import url_concat
+import urllib.request
+
 from .TUDPTransport import TUDPTransport
+from .utils import url_concat
 from thrift.transport.TTransport import TBufferedTransport
 
 
@@ -32,12 +30,10 @@ class LocalAgentHTTP(object):
         self.agent_http_port = int(port)
 
     def _request(self, path, timeout=DEFAULT_TIMEOUT, args=None):
-        http_client = tornado.httpclient.AsyncHTTPClient(
-            defaults=dict(request_timeout=timeout))
         url = 'http://%s:%d/%s' % (self.agent_http_host, self.agent_http_port, path)
         if args:
             url = url_concat(url, args)
-        return http_client.fetch(url)
+        return urllib.request.urlopen(url, timeout=timeout)
 
     def request_sampling_strategy(self, service_name, timeout=DEFAULT_TIMEOUT):
         return self._request('sampling', timeout=timeout, args={'service': service_name})
@@ -81,7 +77,7 @@ class LocalAgentSender(TBufferedTransport):
 
     def readFrame(self):
         """Empty read frame that is never ready"""
-        return Future()
+        return None
 
     # Pass-through for HTTP sampling strategies request.
     def request_sampling_strategy(self, *args, **kwargs):

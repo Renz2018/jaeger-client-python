@@ -19,6 +19,8 @@ import logging
 import random
 import six
 
+import gevent
+
 from threading import Lock
 from tornado.ioloop import PeriodicCallback
 from .constants import (
@@ -30,7 +32,7 @@ from .constants import (
     SAMPLER_TYPE_LOWER_BOUND,
 )
 from .metrics import Metrics, LegacyMetricsFactory
-from .utils import ErrorReporter
+from .utils import ErrorReporter, PeriodicTask
 from .rate_limiter import RateLimiter
 
 default_logger = logging.getLogger('jaeger_tracing')
@@ -371,14 +373,7 @@ class RemoteControlledSampler(Sampler):
         self.running = True
         self.periodic = None
 
-        self.io_loop = channel.io_loop
-        if not self.io_loop:
-            self.logger.error(
-                'Cannot acquire IOLoop, sampler will not be updated')
-        else:
-            # according to IOLoop docs, it's not safe to use timeout methods
-            # unless already running in the loop, so we use `add_callback`
-            self.io_loop.add_callback(self._init_polling)
+        self._init_polling()
 
     def is_sampled(self, trace_id, operation=''):
         with self.lock:
@@ -396,13 +391,12 @@ class RemoteControlledSampler(Sampler):
                 return
             r = random.Random()
             delay = r.random() * self.sampling_refresh_interval
-            self.io_loop.call_later(delay=delay,
-                                    callback=self._delayed_polling)
+            gevent.spawn_later(delay, self._delayed_polling)
             self.logger.info(
                 'Delaying sampling strategy polling by %d sec', delay)
 
     def _delayed_polling(self):
-        periodic = self._create_periodic_callback()
+        periodic = PeriodicTask(self._poll_sampling_manager, self.sampling_refresh_interval)
         self._poll_sampling_manager()  # Initialize sampler now
         with self.lock:
             if not self.running:
@@ -412,43 +406,6 @@ class RemoteControlledSampler(Sampler):
             self.logger.info(
                 'Tracing sampler started with sampling refresh '
                 'interval %d sec', self.sampling_refresh_interval)
-
-    def _create_periodic_callback(self):
-        return PeriodicCallback(
-            callback=self._poll_sampling_manager,
-            # convert interval to milliseconds
-            callback_time=self.sampling_refresh_interval * 1000)
-
-    def _sampling_request_callback(self, future):
-        exception = future.exception()
-        if exception:
-            self.metrics.sampler_query_failure(1)
-            self.error_reporter.error(
-                'Fail to get sampling strategy from jaeger-agent: %s',
-                exception)
-            return
-
-        response = future.result()
-
-        # In Python 3.5 response.body is of type bytes and json.loads() does only support str
-        # See: https://github.com/jaegertracing/jaeger-client-python/issues/180
-        if hasattr(response.body, 'decode') and callable(response.body.decode):
-            response_body = response.body.decode('utf-8')
-        else:
-            response_body = response.body
-
-        try:
-            sampling_strategies_response = json.loads(response_body)
-            self.metrics.sampler_retrieved(1)
-        except Exception as e:
-            self.metrics.sampler_query_failure(1)
-            self.error_reporter.error(
-                'Fail to parse sampling strategy '
-                'from jaeger-agent: %s [%s]', e, response_body)
-            return
-
-        self._update_sampler(sampling_strategies_response)
-        self.logger.debug('Tracing sampler set to %s', self.sampler)
 
     def _update_sampler(self, response):
         with self.lock:
@@ -495,8 +452,28 @@ class RemoteControlledSampler(Sampler):
 
     def _poll_sampling_manager(self):
         self.logger.debug('Requesting tracing sampler refresh')
-        fut = self._channel.request_sampling_strategy(self.service_name)
-        fut.add_done_callback(self._sampling_request_callback)
+        try:
+            resp = self._channel.request_sampling_strategy(self.service_name)
+        except Exception as e:
+            self.metrics.sampler_query_failure(1)
+            self.error_reporter.error(
+                'Fail to get sampling strategy from jaeger-agent: %s',
+                e)
+            return
+
+        response_body = resp.read()
+        try:
+            sampling_strategies_response = json.loads(response_body)
+            self.metrics.sampler_retrieved(1)
+        except Exception as e:
+            self.metrics.sampler_query_failure(1)
+            self.error_reporter.error(
+                'Fail to parse sampling strategy '
+                'from jaeger-agent: %s [%s]', e, response_body)
+            return
+
+        self._update_sampler(sampling_strategies_response)
+        self.logger.debug('Tracing sampler set to %s', self.sampler)
 
     def close(self):
         with self.lock:

@@ -11,9 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import socket
 import struct
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
+
+import gevent
 
 import time
 from six.moves import range
@@ -115,3 +117,60 @@ def interface_ip(interface):
     # Explanation:
     # http://stackoverflow.com/questions/11735821/python-get-localhost-ip
     # http://stackoverflow.com/questions/24196932/how-can-i-get-the-ip-address-of-eth0-in-python
+
+def url_concat(url, args):
+    """Concatenate url and arguments regardless of whether
+    url has existing query parameters.
+    ``args`` may be either a dictionary or a list of key-value pairs
+    (the latter allows for multiple values with the same key.
+    >>> url_concat("http://example.com/foo", dict(c="d"))
+    'http://example.com/foo?c=d'
+    >>> url_concat("http://example.com/foo?a=b", dict(c="d"))
+    'http://example.com/foo?a=b&c=d'
+    >>> url_concat("http://example.com/foo?a=b", [("c", "d"), ("c", "d2")])
+    'http://example.com/foo?a=b&c=d&c=d2'
+    """
+    if args is None:
+        return url
+    parsed_url = urlparse(url)
+    if isinstance(args, dict):
+        parsed_query = parse_qsl(parsed_url.query, keep_blank_values=True)
+        parsed_query.extend(args.items())
+    elif isinstance(args, list) or isinstance(args, tuple):
+        parsed_query = parse_qsl(parsed_url.query, keep_blank_values=True)
+        parsed_query.extend(args)
+    else:
+        err = "'args' parameter should be dict, list or tuple. Not {0}".format(
+            type(args)
+        )
+        raise TypeError(err)
+    final_query = urlencode(parsed_query)
+    url = urlunparse(
+        (
+            parsed_url[0],
+            parsed_url[1],
+            parsed_url[2],
+            parsed_url[3],
+            final_query,
+            parsed_url[5],
+        )
+    )
+    return url
+
+
+class PeriodicTask(object):
+    def __init__(self, func, interval_seconds):
+        self.func = func
+        self.interval = interval_seconds
+        self.stopped = False
+
+    def _loop(self):
+        while not self.stopped:
+            self.func()
+            gevent.sleep(self.interval)
+
+    def start(self):
+        gevent.spawn(self._loop)
+
+    def stop(self):
+        self.stopped = True
