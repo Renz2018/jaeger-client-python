@@ -18,11 +18,10 @@ import json
 import logging
 import random
 import six
+from threading import Lock
 
 import gevent
 
-from threading import Lock
-from tornado.ioloop import PeriodicCallback
 from .constants import (
     _max_id_bits,
     DEFAULT_SAMPLING_INTERVAL,

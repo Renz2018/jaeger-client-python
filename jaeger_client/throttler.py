@@ -18,11 +18,11 @@ import logging
 import random
 from threading import Lock
 
-from tornado.ioloop import PeriodicCallback
+import gevent
 
 from .constants import DEFAULT_THROTTLER_REFRESH_INTERVAL
 from .metrics import Metrics, MetricsFactory
-from .utils import ErrorReporter
+from .utils import ErrorReporter, PeriodicTask
 
 MINIMUM_CREDITS = 1.0
 default_logger = logging.getLogger('jaeger_tracing')
@@ -58,11 +58,7 @@ class RemoteThrottler(object):
         self.running = True
         self.periodic = None
 
-        if not self.channel.io_loop:
-            self.logger.error(
-                'Cannot acquire IOLoop, throttler will not be updated')
-        else:
-            self.channel.io_loop.add_callback(self._init_polling)
+        self._init_polling()
 
     def is_allowed(self, operation):
         with self.lock:
@@ -99,8 +95,7 @@ class RemoteThrottler(object):
 
             r = random.Random()
             delay = r.random() * self.refresh_interval
-            self.channel.io_loop.call_later(
-                delay=delay, callback=self._delayed_polling)
+            gevent.spawn_later(delay, self._delayed_polling)
             self.logger.info(
                 'Delaying throttling credit polling by %d sec', delay)
 
@@ -112,10 +107,9 @@ class RemoteThrottler(object):
         def callback():
             self._fetch_credits(self._operations())
 
-        periodic = PeriodicCallback(
-            callback=callback,
-            # convert interval to milliseconds
-            callback_time=self.refresh_interval * 1000)
+        periodic = PeriodicTask(
+            callback,
+            self.refresh_interval)
         self._fetch_credits(self._operations())
         with self.lock:
             if not self.running:
@@ -130,27 +124,16 @@ class RemoteThrottler(object):
         if not operations:
             return
         self.logger.debug('Requesting throttling credits')
-        fut = self.channel.request_throttling_credits(
-            self.service_name, self.client_id, operations)
-        fut.add_done_callback(self._request_callback)
-
-    def _request_callback(self, future):
-        exception = future.exception()
-        if exception:
+        try:
+            resp = self.channel.request_throttling_credits(
+                self.service_name, self.client_id, operations)
+        except Exception as e:
             self.metrics.throttler_update_failure(1)
             self.error_reporter.error(
                 'Failed to get throttling credits from jaeger-agent: %s',
-                exception)
+                e)
             return
-
-        response = future.result()
-        # In Python 3.5 response.body is of type bytes and json.loads() does only support str
-        # See: https://github.com/jaegertracing/jaeger-client-python/issues/180
-        if hasattr(response.body, 'decode') and callable(response.body.decode):
-            response_body = response.body.decode('utf-8')
-        else:
-            response_body = response.body
-
+        response_body = resp.read()
         try:
             throttling_response = json.loads(response_body)
             self.logger.debug('Received throttling response: %s',
