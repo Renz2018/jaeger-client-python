@@ -39,7 +39,7 @@ setup(
     install_requires=[
         'threadloop>=1,<2',
         'thrift',
-        'tornado>=4.3',
+        # 'tornado>=4.3',
         'opentracing>=2.1,<3.0',
     ],
     # Uncomment below if need to test with unreleased version of opentracing
